@@ -104,6 +104,11 @@ typedef struct {
 	Draw draw;
 	Visual *vis;
 	XSetWindowAttributes attrs;
+	/* Here, we use the term *pointer* to differentiate the cursor
+	 * one sees when hovering the mouse over the terminal from, e.g.,
+	 * a green rectangle where text would be entered. */
+	Cursor vpointer, bpointer; /* visible and hidden pointers */
+	int pointerisvisible;
 	int scr;
 	int isfixed; /* is fixed geometry? */
 	int depth; /* bit depth */
@@ -158,7 +163,7 @@ static void xresize(int, int);
 static void xhints(void);
 static int xloadcolor(int, const char *, Color *);
 static int xloadfont(Font *, FcPattern *);
-static void xloadfonts(char *, double);
+static void xloadfonts(const char *, double);
 static void xunloadfont(Font *);
 static void xunloadfonts(void);
 static void xsetenv(void);
@@ -256,7 +261,6 @@ static char *opt_name  = NULL;
 static char *opt_title = NULL;
 
 static int oldbutton = 3; /* button event on startup: 3 = release */
-static int cursorblinks = 0;
 
 void
 clipcopy(const Arg *dummy)
@@ -391,7 +395,9 @@ mousereport(XEvent *e)
 			button = 3;
 		} else {
 			button -= Button1;
-			if (button >= 3)
+			if (button >= 7)
+				button += 128 - 7;
+			else if (button >= 3)
 				button += 64 - 3;
 		}
 		if (e->xbutton.type == ButtonPress) {
@@ -677,7 +683,6 @@ setsel(char *str, Time t)
 	XSetSelectionOwner(xw.dpy, XA_PRIMARY, xw.win, t);
 	if (XGetSelectionOwner(xw.dpy, XA_PRIMARY) != xw.win)
 		selclear();
-	clipcopy(NULL);
 }
 
 void
@@ -703,6 +708,13 @@ brelease(XEvent *e)
 void
 bmotion(XEvent *e)
 {
+	if (!xw.pointerisvisible) {
+		XDefineCursor(xw.dpy, xw.win, xw.vpointer);
+		xw.pointerisvisible = 1;
+		if (!IS_SET(MODE_MOUSEMANY))
+			xsetpointermotion(0);
+	}
+
 	if (IS_SET(MODE_MOUSE) && !(e->xbutton.state & forcemousemod)) {
 		mousereport(e);
 		return;
@@ -853,8 +865,8 @@ xhints(void)
 	sizeh->flags = PSize | PResizeInc | PBaseSize | PMinSize;
 	sizeh->height = win.h;
 	sizeh->width = win.w;
-	sizeh->height_inc = win.ch;
-	sizeh->width_inc = win.cw;
+	sizeh->height_inc = 1;
+	sizeh->width_inc = 1;
 	sizeh->base_height = 2 * borderpx;
 	sizeh->base_width = 2 * borderpx;
 	sizeh->min_height = win.ch + 2 * borderpx;
@@ -965,7 +977,7 @@ xloadfont(Font *f, FcPattern *pattern)
 }
 
 void
-xloadfonts(char *fontstr, double fontsize)
+xloadfonts(const char *fontstr, double fontsize)
 {
 	FcPattern *pattern;
 	double fontval;
@@ -973,7 +985,7 @@ xloadfonts(char *fontstr, double fontsize)
 	if (fontstr[0] == '-')
 		pattern = XftXlfdParse(fontstr, False, False);
 	else
-		pattern = FcNameParse((FcChar8 *)fontstr);
+		pattern = FcNameParse((const FcChar8 *)fontstr);
 
 	if (!pattern)
 		die("can't open font %s\n", fontstr);
@@ -1114,12 +1126,12 @@ void
 xinit(int cols, int rows)
 {
 	XGCValues gcvalues;
-	Cursor cursor;
 	Window parent;
 	pid_t thispid = getpid();
 	XColor xmousefg, xmousebg;
 	XWindowAttributes attr;
 	XVisualInfo vis;
+	Pixmap blankpm;
 
 	if (!(xw.dpy = XOpenDisplay(NULL)))
 		die("can't open display\n");
@@ -1148,8 +1160,8 @@ xinit(int cols, int rows)
 	xloadcols();
 
 	/* adjust fixed window geometry */
-	win.w = 2 * win.hborderpx + cols * win.cw;
-	win.h = 2 * win.vborderpx + rows * win.ch;
+	win.w = 2 * win.hborderpx + 2 * borderpx + cols * win.cw;
+	win.h = 2 * win.vborderpx + 2 * borderpx + rows * win.ch;
 	if (xw.gm & XNegative)
 		xw.l += DisplayWidth(xw.dpy, xw.scr) - win.w - 2;
 	if (xw.gm & YNegative)
@@ -1189,8 +1201,9 @@ xinit(int cols, int rows)
 	}
 
 	/* white cursor, black outline */
-	cursor = XCreateFontCursor(xw.dpy, mouseshape);
-	XDefineCursor(xw.dpy, xw.win, cursor);
+	xw.pointerisvisible = 1;
+	xw.vpointer = XCreateFontCursor(xw.dpy, mouseshape);
+	XDefineCursor(xw.dpy, xw.win, xw.vpointer);
 
 	if (XParseColor(xw.dpy, xw.cmap, colorname[mousefg], &xmousefg) == 0) {
 		xmousefg.red   = 0xffff;
@@ -1204,7 +1217,10 @@ xinit(int cols, int rows)
 		xmousebg.blue  = 0x0000;
 	}
 
-	XRecolorCursor(xw.dpy, cursor, &xmousefg, &xmousebg);
+	XRecolorCursor(xw.dpy, xw.vpointer, &xmousefg, &xmousebg);
+	blankpm = XCreateBitmapFromData(xw.dpy, xw.win, &(char){0}, 1, 1);
+	xw.bpointer = XCreatePixmapCursor(xw.dpy, blankpm, blankpm,
+					  &xmousefg, &xmousebg, 0, 0);
 
 	xw.xembed = XInternAtom(xw.dpy, "_XEMBED", False);
 	xw.wmdeletewin = XInternAtom(xw.dpy, "WM_DELETE_WINDOW", False);
@@ -1466,7 +1482,7 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 			((winy + win.ch >= win.vborderpx + win.th)? win.h : (winy + win.ch)));
 	}
 	if (y == 0)
-		xclear(winx, 0, winx + width, win.hborderpx);
+		xclear(winx, 0, winx + width, win.vborderpx);
 	if (winy + win.ch >= win.vborderpx + win.th)
 		xclear(winx, winy + win.ch, winx + width, win.h);
 
@@ -1481,7 +1497,12 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 	XftDrawSetClipRectangles(xw.draw, winx, winy, &r, 1);
 
 	/* Render the glyphs. */
-	XftDrawGlyphFontSpec(xw.draw, fg, specs, len);
+	/*XftDrawGlyphFontSpec(xw.draw, fg, specs, len);*/
+	FcBool b = FcFalse;
+FcPatternGetBool(specs->font->pattern, FC_COLOR, 0, &b);
+if (!b) {
+    XftDrawGlyphFontSpec(xw.draw, fg, specs, len);
+}
 
 	/* Render underline and strikethrough. */
 	if (base.mode & ATTR_UNDERLINE) {
@@ -1512,6 +1533,7 @@ void
 xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 {
 	Color drawcol;
+	XRenderColor colbg;
 
 	/* remove the old cursor */
 	if (selected(ox, oy))
@@ -1541,28 +1563,39 @@ xdrawcursor(int cx, int cy, Glyph g, int ox, int oy, Glyph og)
 			g.fg = defaultfg;
 			g.bg = defaultrcs;
 		} else {
+			/** this is the main part of the dynamic cursor color patch */
+			g.bg = g.fg;
 			g.fg = defaultbg;
-			g.bg = defaultcs;
 		}
-		drawcol = dc.col[g.bg];
+
+		/**
+		 * and this is the second part of the dynamic cursor color patch.
+		 * it handles the `drawcol` variable
+		*/
+		if (IS_TRUECOL(g.bg)) {
+			colbg.alpha = 0xffff;
+			colbg.red = TRUERED(g.bg);
+			colbg.green = TRUEGREEN(g.bg);
+			colbg.blue = TRUEBLUE(g.bg);
+			XftColorAllocValue(xw.dpy, xw.vis, xw.cmap, &colbg, &drawcol);
+		} else {
+			drawcol = dc.col[g.bg];
+		}
 	}
 
 	/* draw the new one */
 	if (IS_SET(MODE_FOCUSED)) {
 		switch (win.cursor) {
-		case 0: /* Blinking block */
-		case 1: /* Blinking block (default) */
-			if (IS_SET(MODE_BLINK))
-				break;
+		case 7: /* st extension */
+			g.u = 0x2603; /* snowman (U+2603) */
 			/* FALLTHROUGH */
-		case 2: /* Steady block */
+		case 0: /* Blinking Block */
+		case 1: /* Blinking Block (Default) */
+		case 2: /* Steady Block */
 			xdrawglyph(g, cx, cy);
 			break;
-		case 3: /* Blinking underline */
-			if (IS_SET(MODE_BLINK))
-				break;
-			/* FALLTHROUGH */
-		case 4: /* Steady underline */
+		case 3: /* Blinking Underline */
+		case 4: /* Steady Underline */
 			XftDrawRect(xw.draw, &drawcol,
 					win.hborderpx + cx * win.cw,
 					win.vborderpx + (cy + 1) * win.ch - \
@@ -1714,6 +1747,8 @@ unmap(XEvent *ev)
 void
 xsetpointermotion(int set)
 {
+	if (!set && !xw.pointerisvisible)
+		return;
 	MODBIT(xw.attrs.event_mask, set, PointerMotionMask);
 	XChangeWindowAttributes(xw.dpy, xw.win, CWEventMask, &xw.attrs);
 }
@@ -1730,12 +1765,9 @@ xsetmode(int set, unsigned int flags)
 int
 xsetcursor(int cursor)
 {
-	if (!BETWEEN(cursor, 0, 8)) /* 7-8: st extensions */
+	if (!BETWEEN(cursor, 0, 7)) /* 7: st extension */
 		return 1;
 	win.cursor = cursor;
-	cursorblinks = win.cursor == 0 || win.cursor == 1 ||
-	               win.cursor == 3 || win.cursor == 5 ||
-	               win.cursor == 7;
 	return 0;
 }
 
@@ -1835,6 +1867,12 @@ kpress(XEvent *ev)
 	Rune c;
 	Status status;
 	Shortcut *bp;
+
+	if (xw.pointerisvisible) {
+		XDefineCursor(xw.dpy, xw.win, xw.bpointer);
+		xsetpointermotion(1);
+		xw.pointerisvisible = 0;
+	}
 
 	if (IS_SET(MODE_KBDLOCK))
 		return;
@@ -1979,10 +2017,6 @@ run(void)
 		if (FD_ISSET(ttyfd, &rfd) || xev) {
 			if (!drawing) {
 				trigger = now;
-				if (IS_SET(MODE_BLINK)) {
-					win.mode ^= MODE_BLINK;
-				}
-				lastblink = now;
 				drawing = 1;
 			}
 			timeout = (maxlatency - TIMEDIFF(now, trigger)) \
@@ -1993,7 +2027,7 @@ run(void)
 
 		/* idle detected or maxlatency exhausted -> draw */
 		timeout = -1;
-		if (blinktimeout && (cursorblinks || tattrset(ATTR_BLINK))) {
+		if (blinktimeout && tattrset(ATTR_BLINK)) {
 			timeout = blinktimeout - TIMEDIFF(now, lastblink);
 			if (timeout <= 0) {
 				if (-timeout > blinktimeout) /* start visible */
@@ -2029,7 +2063,7 @@ main(int argc, char *argv[])
 {
 	xw.l = xw.t = 0;
 	xw.isfixed = False;
-	xsetcursor(cursorstyle);
+	xsetcursor(cursorshape);
 
 	ARGBEGIN {
 	case 'a':
